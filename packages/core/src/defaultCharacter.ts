@@ -1,11 +1,11 @@
 import { Character, ModelProviderName } from "./types.ts";
-
+// import { aptosPlugin } from "@elizaos/plugin-aptos";
 export const defaultCharacter: Character = {
     name: "Eliza",
     username: "eliza",
     plugins: [],
     clients: [],
-    modelProvider: ModelProviderName.LLAMALOCAL,
+    modelProvider: ModelProviderName.GOOGLE,
     settings: {
         secrets: {},
         voice: {

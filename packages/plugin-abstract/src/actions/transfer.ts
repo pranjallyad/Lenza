@@ -11,12 +11,19 @@ import {
     composeContext,
     generateObject,
 } from "@elizaos/core";
-import { validateAbstractConfig } from "../environment";
+import { validateLensConfig } from "../environment";
+import { getDefaultProvider, Network, Wallet } from "@lens-network/sdk/ethers";
+import { ethers, formatEther } from "ethers";
 
-import { Address, createWalletClient, erc20Abi, http, parseEther } from "viem";
-import { abstractTestnet } from "viem/chains";
-import { privateKeyToAccount } from "viem/accounts";
-import { eip712WalletActions } from "viem/zksync";
+import {
+    Address,
+    createWalletClient,
+    erc20Abi,
+    http,
+    parseEther,
+    isAddress,
+} from "viem";
+
 import { z } from "zod";
 
 const TransferSchema = z.object({
@@ -36,7 +43,7 @@ export function isTransferContent(
 ): content is TransferContent {
     // Validate types
     const validTypes =
-        typeof content.tokenAddress === "string" &&
+
         typeof content.recipient === "string" &&
         (typeof content.amount === "string" ||
             typeof content.amount === "number");
@@ -46,8 +53,7 @@ export function isTransferContent(
 
     // Validate addresses
     const validAddresses =
-        content.tokenAddress.startsWith("0x") &&
-        content.tokenAddress.length === 42 &&
+
         content.recipient.startsWith("0x") &&
         content.recipient.length === 42;
 
@@ -58,12 +64,12 @@ const transferTemplate = `Respond with a JSON markdown block containing only the
 
 Here are several frequently used addresses. Use these for the corresponding tokens:
 - ETH/eth: 0x000000000000000000000000000000000000800A
-- USDC/usdc: 0xe4c7fbb0a626ed208021ccaba6be1566905e2dfc
+
 
 Example response:
 \`\`\`json
 {
-    "tokenAddress": "0x5A7d6b2F92C77FAD6CCaBd7EE0624E64907Eaf3E",
+
     "recipient": "0xCCa8009f5e09F8C5dB63cb0031052F9CB635Af62",
     "amount": "1000"
 }
@@ -79,26 +85,76 @@ Given the recent messages, extract the following information about the requested
 Respond with a JSON markdown block containing only the extracted values.`;
 
 const ETH_ADDRESS = "0x000000000000000000000000000000000000800A";
-const ERC20_OVERRIDE_INFO = {
-    "0xe4c7fbb0a626ed208021ccaba6be1566905e2dfc": {
-        name: "USDC",
-        decimals: 6,
-    },
-};
+
+export async function setupProviders() {
+    // Initialize providers for both L2 (Lens) and L1 (Ethereum)
+    const lensProvider = getDefaultProvider(Network.Testnet);
+    const ethProvider = ethers.getDefaultProvider("sepolia");
+
+    return { lensProvider, ethProvider };
+}
+
+export async function setupWallet(
+    lensProvider: any,
+    ethProvider: any,
+    key: any
+) {
+    // Create wallet instance with both L2 and L1 providers
+    const wallet = new Wallet(key, lensProvider, ethProvider);
+
+    return wallet;
+}
+
+export async function transferTokens(
+    wallet: any,
+    recipientAddress: string,
+    amount: string
+) {
+    try {
+        // Validate recipient address
+        if (!isAddress(recipientAddress)) {
+            throw new Error("Invalid recipient address");
+        }
+
+        // Create transaction object
+        const tx = {
+            to: recipientAddress,
+            value: parseEther(amount),
+        };
+
+        // Send transaction
+        console.log(
+            `Initiating transfer of ${amount} tokens to ${recipientAddress}...`
+        );
+        const transaction = await wallet.sendTransaction(tx);
+
+        // Wait for transaction confirmation
+        console.log(`Transaction hash: ${transaction.hash}`);
+        const receipt = await transaction.wait();
+
+        console.log("Transfer completed successfully!");
+        console.log("Transaction receipt:", receipt);
+
+        return transaction.hash;
+    } catch (error) {
+        console.error("Error transferring tokens:", error);
+        throw error;
+    }
+}
 
 export default {
     name: "SEND_TOKEN",
     similes: [
-        "TRANSFER_TOKEN_ON_ABSTRACT",
-        "TRANSFER_TOKENS_ON_ABSTRACT",
-        "SEND_TOKENS_ON_ABSTRACT",
-        "SEND_ETH_ON_ABSTRACT",
-        "PAY_ON_ABSTRACT",
-        "MOVE_TOKENS_ON_ABSTRACT",
-        "MOVE_ETH_ON_ABSTRACT",
+        "TRANSFER_TOKEN_ON_LENS",
+        "TRANSFER_TOKENS_ON_LENS",
+        "SEND_TOKENS_ON_LENS",
+        "SEND_GRASS_ON_LENS",
+        "PAY_ON_LENS",
+        "MOVE_TOKENS_ON_LENS",
+        "MOVE_GRASS_ON_LENS",
     ],
     validate: async (runtime: IAgentRuntime, message: Memory) => {
-        await validateAbstractConfig(runtime);
+        await validateLensConfig(runtime);
         return true;
     },
     description: "Transfer tokens from the agent's wallet to another address",
@@ -109,7 +165,7 @@ export default {
         _options: { [key: string]: unknown },
         callback?: HandlerCallback
     ): Promise<boolean> => {
-        elizaLogger.log("Starting Abstract SEND_TOKEN handler...");
+        elizaLogger.log("Starting LENS SEND_TOKEN handler...");
 
         // Initialize or update state
         if (!state) {
@@ -147,43 +203,22 @@ export default {
         }
 
         try {
-            const PRIVATE_KEY = runtime.getSetting("ABSTRACT_PRIVATE_KEY")!;
-            const account = privateKeyToAccount(`0x${PRIVATE_KEY}`);
-
-            const walletClient = createWalletClient({
-                chain: abstractTestnet,
-                transport: http(),
-            }).extend(eip712WalletActions());
+            const PRIVATE_KEY = runtime.getSetting("LENS_PRIVATE_KEY")!;
+            const { lensProvider, ethProvider } = await setupProviders();
+            const wallet = await setupWallet(
+                lensProvider,
+                ethProvider,
+                PRIVATE_KEY
+            );
+            const amount = content.amount.toString();
 
             let hash;
-            if (
-                content.tokenAddress.toLowerCase() !== ETH_ADDRESS.toLowerCase()
-            ) {
-                // Convert amount to proper token decimals
-                const tokenInfo =
-                    ERC20_OVERRIDE_INFO[content.tokenAddress.toLowerCase()];
-                const decimals = tokenInfo?.decimals ?? 18; // Default to 18 decimals if not specified
-                const tokenAmount =
-                    BigInt(content.amount) * BigInt(10 ** decimals);
 
-                // Execute ERC20 transfer
-                hash = await walletClient.writeContract({
-                    account,
-                    chain: abstractTestnet,
-                    address: content.tokenAddress as Address,
-                    abi: erc20Abi,
-                    functionName: "transfer",
-                    args: [content.recipient as Address, tokenAmount],
-                });
-            } else {
-                hash = await walletClient.sendTransaction({
-                    account: account,
-                    chain: abstractTestnet,
-                    to: content.recipient as Address,
-                    value: parseEther(content.amount.toString()),
-                    kzg: undefined,
-                });
-            }
+            hash = await transferTokens(
+                wallet,
+                content.recipient as Address,
+                amount
+            );
 
             elizaLogger.success(
                 "Transfer completed successfully! Transaction hash: " + hash
@@ -215,20 +250,20 @@ export default {
             {
                 user: "{{user1}}",
                 content: {
-                    text: "Send 100 USDC to 0xCCa8009f5e09F8C5dB63cb0031052F9CB635Af62",
+                    text: "Send 1 Grass to 0xCCa8009f5e09F8C5dB63cb0031052F9CB635Af62",
                 },
             },
             {
                 user: "{{agent}}",
                 content: {
-                    text: "Sure, I'll send 100 USDC to that address now.",
+                    text: "Sure, I'll send 1 Grass to that address now.",
                     action: "SEND_TOKEN",
                 },
             },
             {
                 user: "{{agent}}",
                 content: {
-                    text: "Successfully sent 100 USDC to 0xCCa8009f5e09F8C5dB63cb0031052F9CB635Af62\nTransaction: 0x4fed598033f0added272c3ddefd4d83a521634a738474400b27378db462a76ec",
+                    text: "Successfully sent 1 Grass to 0xCCa8009f5e09F8C5dB63cb0031052F9CB635Af62\nTransaction: 0x4fed598033f0added272c3ddefd4d83a521634a738474400b27378db462a76ec",
                 },
             },
         ],
@@ -236,20 +271,20 @@ export default {
             {
                 user: "{{user1}}",
                 content: {
-                    text: "Please send 0.1 ETH to 0xbD8679cf79137042214fA4239b02F4022208EE82",
+                    text: "Please send 0.1 GRASS to 0xbD8679cf79137042214fA4239b02F4022208EE82",
                 },
             },
             {
                 user: "{{agent}}",
                 content: {
-                    text: "Of course. Sending 0.1 ETH to that address now.",
+                    text: "Of course. Sending 0.1 Grass to that address now.",
                     action: "SEND_TOKEN",
                 },
             },
             {
                 user: "{{agent}}",
                 content: {
-                    text: "Successfully sent 0.1 ETH to 0xbD8679cf79137042214fA4239b02F4022208EE82\nTransaction: 0x0b9f23e69ea91ba98926744472717960cc7018d35bc3165bdba6ae41670da0f0",
+                    text: "Successfully sent 0.1 Grass to 0xbD8679cf79137042214fA4239b02F4022208EE82\nTransaction: 0x0b9f23e69ea91ba98926744472717960cc7018d35bc3165bdba6ae41670da0f0",
                 },
             },
         ],
